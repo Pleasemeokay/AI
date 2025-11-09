@@ -18,13 +18,13 @@ import google.generativeai as genai
 # -------------------------------------------------------------------
 # 📜 Configuration
 # -------------------------------------------------------------------
-# Get credentials from Railway Environment Variables
+# Get credentials from Render Environment Variables
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# This is the public URL Railway gives your service
-# e.g., https://my-bot-app.up.railway.app
-RAILWAY_PUBLIC_URL = os.environ.get("RAILWAY_PUBLIC_URL")
+# This is the public URL Render gives your service
+# e.g., https://my-bot-app.onrender.com
+RENDER_URL = os.environ.get("RENDER_URL")  # <--- CHANGED
 
 # 💎 Gemini configuration
 genai.configure(api_key=GEMINI_API_KEY)
@@ -109,15 +109,16 @@ async def startup_event():
     await bot_app.start()
 
     # Register webhook
-    if RAILWAY_PUBLIC_URL:
-        webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook"
+    if RENDER_URL:  # <--- CHANGED
+        webhook_url = f"{RENDER_URL}/webhook"  # <--- CHANGED
         await bot.set_webhook(webhook_url)
         print(f"Webhook set to: {webhook_url}")
     else:
-        print("ERROR: RAILWAY_PUBLIC_URL not set. Webhook not registered.")
+        print("ERROR: RENDER_URL not set. Webhook not registered.")  # <--- CHANGED
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """On shutdown, stop the bot application."""
     await bot_app.stop()
     await bot_app.shutdown()
+    
