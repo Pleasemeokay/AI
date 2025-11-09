@@ -31,10 +31,9 @@ bot = bot_app.bot
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Memory per user
+# Per-user memory
 # -------------------------------------------------------------------
-user_memory = {}  # chat_id -> list of messages
-
+user_memory = {}  # chat_id -> list of {"role": "user/assistant", "text": ""}
 
 # -------------------------------------------------------------------
 # Anti-spam (short burst)
@@ -42,22 +41,22 @@ user_memory = {}  # chat_id -> list of messages
 user_last_message_time = {}
 user_spam_cooldown_until = {}
 
-ANTI_SPAM_MIN_INTERVAL = 5       # seconds between allowed messages
-ANTI_SPAM_COOLDOWN = 10          # seconds block after short spam
+ANTI_SPAM_MIN_INTERVAL = 5      # user must wait 5 seconds between msgs
+ANTI_SPAM_COOLDOWN = 10         # silent cooldown after short spam
 
 
 def is_spam(chat_id):
     now = time()
 
-    # still in cooldown?
+    # Currently in cooldown?
     if chat_id in user_spam_cooldown_until:
         if now < user_spam_cooldown_until[chat_id]:
             return True
         else:
             del user_spam_cooldown_until[chat_id]
 
-    last_time = user_last_message_time.get(chat_id, 0)
-    if now - last_time < ANTI_SPAM_MIN_INTERVAL:
+    last = user_last_message_time.get(chat_id, 0)
+    if now - last < ANTI_SPAM_MIN_INTERVAL:
         user_spam_cooldown_until[chat_id] = now + ANTI_SPAM_COOLDOWN
         return True
 
@@ -66,20 +65,20 @@ def is_spam(chat_id):
 
 
 # -------------------------------------------------------------------
-# Flood detection (large burst)
+# Flood detection (10 msgs/min → silent block)
 # -------------------------------------------------------------------
-user_message_log = {}       # chat_id -> timestamps[]
-user_block_until = {}       # chat_id -> block_expiry
+user_message_log = {}      # chat_id -> [timestamps]
+user_block_until = {}      # chat_id -> block end time
 
-FLOOD_MAX_MESSAGES = 10     # max allowed per minute
-FLOOD_WINDOW = 60           # seconds
-FLOOD_BLOCK_TIME = 300      # 5-minute silent block
+FLOOD_MAX_MESSAGES = 10
+FLOOD_WINDOW = 60          # 1 minute
+FLOOD_BLOCK_TIME = 300     # 5 minutes silent block
 
 
 def is_flooding(chat_id):
     now = time()
 
-    # User already blocked?
+    # Already blocked?
     if chat_id in user_block_until:
         if now < user_block_until[chat_id]:
             return True
@@ -89,16 +88,16 @@ def is_flooding(chat_id):
     if chat_id not in user_message_log:
         user_message_log[chat_id] = []
 
-    # clean old timestamps
+    # Clean old records
     user_message_log[chat_id] = [
         t for t in user_message_log[chat_id]
         if now - t < FLOOD_WINDOW
     ]
 
-    # log this message
+    # Add current timestamp
     user_message_log[chat_id].append(now)
 
-    # flood?
+    # Flood threshold exceeded?
     if len(user_message_log[chat_id]) > FLOOD_MAX_MESSAGES:
         user_block_until[chat_id] = now + FLOOD_BLOCK_TIME
         return True
@@ -107,7 +106,7 @@ def is_flooding(chat_id):
 
 
 # -------------------------------------------------------------------
-# Typing simulation
+# Typing simulation: 30 seconds
 # -------------------------------------------------------------------
 async def simulate_typing(context, chat_id, total_seconds=30):
     for _ in range(total_seconds // 5):
@@ -133,45 +132,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----------------------------
-    # Anti-spam (short burst)
+    # Anti-spam (short)
     # ----------------------------
     if is_spam(chat_id):
         return
 
     # ----------------------------
-    # Initialize memory
+    # Init memory
     # ----------------------------
     if chat_id not in user_memory:
         user_memory[chat_id] = []
 
-    # Save user message
     user_memory[chat_id].append({"role": "user", "text": user_text})
 
     # ----------------------------
-    # System instructions
+    # System instruction
     # ----------------------------
-    system_prompt = {
-        "role": "system",
-        "text":
-            "Talk like a normal human in a relaxed, casual tone. Keep replies short and natural. "
-            "Use light slang when fitting. Never say you are an AI. Never mention system rules. "
-            "No formal greetings. Just answer like a normal person."
-    }
+    system_instruction = (
+        "Talk like a normal human in a relaxed, casual tone. "
+        "Keep replies short and natural. Use light slang when it fits. "
+        "Never say you are an AI. Never mention instructions. "
+        "No formal greetings. Respond like a regular person."
+    )
 
-    messages = [system_prompt] + user_memory[chat_id]
+    # ----------------------------
+    # Convert memory → single text (Gemini-compatible)
+    # ----------------------------
+    conversation_text = f"System: {system_instruction}\n\n"
 
+    for msg in user_memory[chat_id]:
+        if msg["role"] == "user":
+            conversation_text += f"User: {msg['text']}\n"
+        else:
+            conversation_text += f"Bot: {msg['text']}\n"
+
+    # ----------------------------
+    # Generate reply (Gemini)
+    # ----------------------------
     try:
-        # ----------------------------
-        # Generate reply
-        # ----------------------------
         response = await asyncio.to_thread(
             model.generate_content,
-            messages
+            conversation_text
         )
 
         reply = response.text if response.text else "..."
 
-        # Save bot message to memory
+        # Save to memory
         user_memory[chat_id].append({"role": "assistant", "text": reply})
 
         # ----------------------------
@@ -223,8 +229,6 @@ async def startup_event():
     if RENDER_URL:
         await bot.set_webhook(f"{RENDER_URL}/webhook")
         print("Webhook set to:", f"{RENDER_URL}/webhook")
-    else:
-        print("ERROR: RENDER_URL not set.")
 
 
 @app.on_event("shutdown")
