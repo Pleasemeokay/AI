@@ -16,109 +16,100 @@ from telegram.ext import (
 import google.generativeai as genai
 
 # -------------------------------------------------------------------
-# 📜 Configuration
+# Configuration
 # -------------------------------------------------------------------
-# Get credentials from Render Environment Variables
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+RENDER_URL = os.environ.get("RENDER_URL")  # e.g., https://your-app.onrender.com
 
-# This is the public URL Render gives your service
-# e.g., https://my-bot-app.onrender.com
-RENDER_URL = os.environ.get("RENDER_URL")  # <--- CHANGED
-
-# 💎 Gemini configuration
+# Gemini configuration
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
-# 🤖 Telegram bot
+# Telegram bot
 bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
 bot = bot_app.bot
 
-# 🚀 FastAPI app
+# FastAPI app
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# 🤖 Bot Handlers
+# Bot Handlers
 # -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message when the /start command is issued."""
-    await update.message.reply_text("Hello! I'm a Gemini-powered bot. Send me a message!")
+    await update.message.reply_text("Hello! I'm a Gemini-powered bot. Send me something!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text messages and replies with a Gemini response."""
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # Show "typing..." action
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        # Send text to Gemini
-        # Note: Using to_thread for the blocking (non-async) SDK call
+        # Fresh chat session each time (no shared history issues)
         response = await asyncio.to_thread(
             model.generate_content,
             user_text
         )
 
-        reply = response.text
-        
-        # Handle empty responses
-        if not reply:
-            reply = "I'm not sure how to respond to that."
+        reply = response.text if response.text else "No response generated."
 
         await update.message.reply_text(reply)
 
     except Exception as e:
-        print(f"Error processing Gemini request: {e}")
-        await update.message.reply_text("Sorry, I encountered an error while processing your message.")
+        print("Gemini error:", e)
+        await update.message.reply_text("Error processing your message.")
 
 
 # -------------------------------------------------------------------
-# 🌐 FastAPI Webhook Endpoint
+# FastAPI Webhook Endpoint
 # -------------------------------------------------------------------
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    """This endpoint receives updates from Telegram."""
     try:
         data = await request.json()
         update = Update.de_json(data, bot)
         await bot_app.update_queue.put(update)
         return Response(status_code=200)
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print("Webhook error:", e)
         return Response(status_code=500)
+
 
 @app.get("/")
 def health_check():
-    """A simple health check endpoint."""
-    return {"status": "ok", "bot_initialized": bot_app.initialized}
+    return {"status": "ok"}
+
 
 # -------------------------------------------------------------------
-# 🚀 Startup / Shutdown Events
+# Startup / Shutdown
 # -------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    """On startup, register handlers and set the webhook."""
     # Register handlers
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Initialize the bot application
+    # Init + Start the application
     await bot_app.initialize()
-    # Start the background tasks (like processing updates from the queue)
     await bot_app.start()
 
     # Register webhook
-    if RENDER_URL:  # <--- CHANGED
-        webhook_url = f"{RENDER_URL}/webhook"  # <--- CHANGED
-        await bot.set_webhook(webhook_url)
-        print(f"Webhook set to: {webhook_url}")
+    if RENDER_URL:
+        await bot.set_webhook(f"{RENDER_URL}/webhook")
+        print("Webhook set to:", f"{RENDER_URL}/webhook")
     else:
-        print("ERROR: RENDER_URL not set. Webhook not registered.")  # <--- CHANGED
+        print("ERROR: RENDER_URL not set, webhook not registered.")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """On shutdown, stop the bot application."""
     await bot_app.stop()
     await bot_app.shutdown()
-    
+
+
+# -------------------------------------------------------------------
+# Local run (Render uses gunicorn)
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
