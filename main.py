@@ -1,7 +1,7 @@
 import os
 import asyncio
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 
 from telegram import Update, Bot
 from telegram.constants import ChatAction
@@ -16,28 +16,28 @@ from telegram.ext import (
 import google.generativeai as genai
 from time import time
 
-# -------------------------------------------------------------------
-# configuration
-# -------------------------------------------------------------------
+
+# -----------------------------------------------------------
+# ENV CONFIG
+# -----------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-RENDER_URL = os.environ.get("RENDER_URL")
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
-bot = bot_app.bot
 app = FastAPI()
 
-# -------------------------------------------------------------------
-# per-user memory
-# -------------------------------------------------------------------
+
+# -----------------------------------------------------------
+# MEMORY
+# -----------------------------------------------------------
 user_memory = {}
 
-# -------------------------------------------------------------------
-# anti-spam
-# -------------------------------------------------------------------
+
+# -----------------------------------------------------------
+# ANTI-SPAM (short burst)
+# -----------------------------------------------------------
 user_last_message_time = {}
 user_spam_cooldown_until = {}
 
@@ -54,6 +54,7 @@ def is_spam(chat_id):
             del user_spam_cooldown_until[chat_id]
 
     last = user_last_message_time.get(chat_id, 0)
+
     if now - last < ANTI_SPAM_MIN_INTERVAL:
         user_spam_cooldown_until[chat_id] = now + ANTI_SPAM_COOLDOWN
         return True
@@ -62,9 +63,9 @@ def is_spam(chat_id):
     return False
 
 
-# -------------------------------------------------------------------
-# flood detection
-# -------------------------------------------------------------------
+# -----------------------------------------------------------
+# FLOOD DETECTION (10 msgs/min = silent 5-min block)
+# -----------------------------------------------------------
 user_message_log = {}
 user_block_until = {}
 
@@ -84,6 +85,7 @@ def is_flooding(chat_id):
     if chat_id not in user_message_log:
         user_message_log[chat_id] = []
 
+    # trim old timestamps
     user_message_log[chat_id] = [
         t for t in user_message_log[chat_id]
         if now - t < FLOOD_WINDOW
@@ -98,19 +100,18 @@ def is_flooding(chat_id):
     return False
 
 
-# -------------------------------------------------------------------
-# typing simulation (slow human-like)
-# -------------------------------------------------------------------
+# -----------------------------------------------------------
+# TYPING SIMULATION (slow human-like)
+# -----------------------------------------------------------
 async def simulate_typing(context, chat_id, total_seconds=45):
-    # sends typing every 5 seconds
     for _ in range(total_seconds // 5):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(5)
 
 
-# -------------------------------------------------------------------
-# handlers
-# -------------------------------------------------------------------
+# -----------------------------------------------------------
+# BOT HANDLERS
+# -----------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("hey, what's on your mind?")
 
@@ -119,7 +120,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # flood & short-burst spam protection
+    # spam & flood protections
     if is_flooding(chat_id):
         return
     if is_spam(chat_id):
@@ -130,46 +131,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_memory[chat_id].append({"role": "user", "text": user_text})
 
-    # -------------------------------------------------------------------
-    # system instruction (lowercase + slow human-like + critical questioning)
-    # -------------------------------------------------------------------
+    # SYSTEM BEHAVIOR
     system_instruction = (
         "reply in fully lower-case only. never use capital letters. "
         "respond like a slow, relaxed human who thinks before speaking. "
-        "keep the tone casual, unhurried, and natural. "
+        "keep the tone casual, natural, and unhurried. "
         "adopt a neutral, critical-thinking style: question assumptions, "
         "ask thoughtful analytical questions, and encourage examining evidence "
         "without promoting misinformation. do not deny scientific facts. "
-        "do not promote flat-earth ideas. be curious and reflective, focusing "
-        "on slow, human-like thinking."
+        "do not promote flat-earth ideas. stay curious and reflective."
     )
 
-    # -------------------------------------------------------------------
-    # convert memory → single text block for gemini
-    # -------------------------------------------------------------------
-    conversation_text = f"system: {system_instruction}\n\n"
+    # BUILD CHAT TRANSCRIPT (gemini format)
+    transcript = f"system: {system_instruction}\n\n"
 
     for msg in user_memory[chat_id]:
         if msg["role"] == "user":
-            conversation_text += f"user: {msg['text']}\n"
+            transcript += f"user: {msg['text']}\n"
         else:
-            conversation_text += f"bot: {msg['text']}\n"
+            transcript += f"bot: {msg['text']}\n"
 
-    # -------------------------------------------------------------------
-    # generate reply
-    # -------------------------------------------------------------------
+    # GENERATE
     try:
         response = await asyncio.to_thread(
             model.generate_content,
-            conversation_text
+            transcript
         )
 
         reply = response.text if response.text else "..."
-        reply = reply.lower()  # enforce lowercase
+        reply = reply.lower()
 
         user_memory[chat_id].append({"role": "assistant", "text": reply})
 
-        # slow human-like typing
         await simulate_typing(context, chat_id, total_seconds=45)
 
         await update.message.reply_text(reply)
@@ -179,48 +172,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("error processing your message.")
 
 
-# -------------------------------------------------------------------
-# webhook
-# -------------------------------------------------------------------
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, bot)
-        await bot_app.update_queue.put(update)
-        return Response(status_code=200)
-    except:
-        return Response(status_code=500)
+# -----------------------------------------------------------
+# LONG POLLING STARTUP
+# -----------------------------------------------------------
+async def run_bot():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await application.initialize()
+    await application.start()
+    await application.run_polling()   # <-- long polling forever
 
 
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(run_bot())
+
+
+# -----------------------------------------------------------
+# FASTAPI HEALTH CHECK
+# -----------------------------------------------------------
 @app.get("/")
-def health_check():
+def health():
     return {"status": "ok"}
 
 
-# -------------------------------------------------------------------
-# startup / shutdown
-# -------------------------------------------------------------------
-@app.on_event("startup")
-async def startup_event():
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await bot_app.initialize()
-    await bot_app.start()
-
-    if RENDER_URL:
-        await bot.set_webhook(f"{RENDER_URL}/webhook")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await bot_app.stop()
-    await bot_app.shutdown()
-
-
-# -------------------------------------------------------------------
-# local run
-# -------------------------------------------------------------------
+# -----------------------------------------------------------
+# LOCAL RUN
+# -----------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
