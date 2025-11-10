@@ -159,6 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # system instruction
     # -----------------------------------------------------------
     system_instruction = (
+        "always under 15 words"
         "reply in fully lower-case only. never use capital letters. "
         "respond like a slow, relaxed human who thinks before speaking. "
         "keep the tone casual, unhurried, and natural. "
