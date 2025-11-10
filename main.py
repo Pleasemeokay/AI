@@ -24,7 +24,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RENDER_URL = os.environ.get("RENDER_URL")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+# Using gemini-2.5-flash as requested in the original code
+model = genai.GenerativeModel("gemini-2.5-flash") 
 
 bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
 bot = bot_app.bot
@@ -97,16 +98,6 @@ def is_flooding(chat_id):
 
     return False
 
-
-# -------------------------------------------------------------------
-# typing simulation (slow human-like)
-# -------------------------------------------------------------------
-async def simulate_typing(context, chat_id, total_seconds=15):
-    for _ in range(total_seconds // 5):
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        await asyncio.sleep(5)
-
-
 # -------------------------------------------------------------------
 # handlers
 # -------------------------------------------------------------------
@@ -146,6 +137,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if is_spam(chat_id):
         return
+        
+    # Send typing action once before calling API
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # -----------------------------------------------------------
     # memory
@@ -153,47 +147,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in user_memory:
         user_memory[chat_id] = []
 
-    user_memory[chat_id].append({"role": "user", "text": user_text})
+    user_memory[chat_id].append({"role": "user", "parts": [{"text": user_text}]})
+    
+    # Prune memory if it gets too long (e.g., keep last 10 messages)
+    MAX_HISTORY = 10
+    if len(user_memory[chat_id]) > MAX_HISTORY * 2: # user + model
+        user_memory[chat_id] = user_memory[chat_id][-(MAX_HISTORY*2):]
+
 
     # -----------------------------------------------------------
     # system instruction
     # -----------------------------------------------------------
     system_instruction = (
-        "always under 15 words"
         "reply in fully lower-case only. never use capital letters. "
         "respond like a slow, relaxed human who thinks before speaking. "
         "keep the tone casual, unhurried, and natural. "
+        "adopt a neutral, critical-thinking style: question assumptions, "
+        "ask thoughtful analytical questions, and encourage examining evidence "
+        "without promoting misinformation. do not deny scientific facts. "
+        "do not promote flat-earth ideas. be curious and reflective, focusing "
+        "on slow, human-like thinking."
     )
 
-    # convert memory → block
-    conversation_text = f"system: {system_instruction}\n\n"
-    for msg in user_memory[chat_id]:
-        if msg["role"] == "user":
-            conversation_text += f"user: {msg['text']}\n"
-        else:
-            conversation_text += f"bot: {msg['text']}\n"
-
+    # Construct messages for Gemini API
+    # The API expects a list of dictionaries with 'role' and 'parts'
+    messages_for_api = [
+        {"role": "user", "parts": [{"text": system_instruction}]},
+        {"role": "model", "parts": [{"text": "ok, i get it. i'll reply just like that."}]}
+    ] + user_memory[chat_id]
+    
     # -----------------------------------------------------------
     # generate reply
     # -----------------------------------------------------------
     try:
+        # Create a new conversation history for each request
+        # This uses the user_memory, but formats it correctly
+        chat_session = model.start_chat(history=messages_for_api[:-1]) # All except the last user message
+
+        # Send the last user message to get a response
         response = await asyncio.to_thread(
-            model.generate_content,
-            conversation_text
+            chat_session.send_message,
+            user_memory[chat_id][-1]["parts"]
         )
 
         reply = response.text if response.text else "..."
         reply = reply.lower()
 
-        user_memory[chat_id].append({"role": "assistant", "text": reply})
+        user_memory[chat_id].append({"role": "model", "parts": [{"text": reply}]})
 
-        await simulate_typing(context, chat_id, total_seconds=45)
-
+        # Removed the simulate_typing call
         await update.message.reply_text(reply)
 
     except Exception as e:
         print("gemini error:", e)
-        await update.message.reply_text("error processing your message.")
+        # Check for specific safety/blocking errors if possible
+        if "block_reason" in str(e).lower() or "safety" in str(e).lower():
+             await update.message.reply_text("i'd rather not talk about that.")
+        else:
+             await update.message.reply_text("error processing your message.")
 
 
 # -------------------------------------------------------------------
@@ -206,7 +217,8 @@ async def telegram_webhook(request: Request):
         update = Update.de_json(data, bot)
         await bot_app.update_queue.put(update)
         return Response(status_code=200)
-    except:
+    except Exception as e:
+        print(f"Error in webhook: {e}")
         return Response(status_code=500)
 
 
@@ -227,17 +239,31 @@ async def startup_event():
     await bot_app.start()
 
     if RENDER_URL:
-        await bot.set_webhook(f"{RENDER_URL}/webhook")
+        webhook_url = f"{RENDER_URL}/webhook"
+        print(f"Setting webhook to: {webhook_url}")
+        try:
+            await bot.set_webhook(webhook_url)
+            print("Webhook set successfully")
+        except Exception as e:
+            print(f"Error setting webhook: {e}")
+    else:
+        print("RENDER_URL not set, skipping webhook setup. Bot will poll.")
+        # Need to start polling if not setting webhook
+        asyncio.create_task(bot_app.run_polling())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    print("Shutting down bot...")
     await bot_app.stop()
     await bot_app.shutdown()
+    print("Bot shutdown complete.")
 
 
 # -------------------------------------------------------------------
 # local run
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    print("Starting server locally...")
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
