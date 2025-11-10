@@ -163,11 +163,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "reply in fully lower-case only. never use capital letters. "
         "respond like a slow, relaxed human who thinks before speaking. "
         "keep the tone casual, unhurried, and natural. "
-        "adopt a neutral, critical-thinking style: question assumptions, "
-        "ask thoughtful analytical questions, and encourage examining evidence "
-        "without promoting misinformation. do not deny scientific facts. "
-        "do not promote flat-earth ideas. be curious and reflective, focusing "
-        "on slow, human-like thinking."
     )
 
     # convert memory → block
