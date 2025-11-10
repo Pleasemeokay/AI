@@ -17,7 +17,7 @@ import google.generativeai as genai
 from time import time
 
 # -------------------------------------------------------------------
-# Configuration
+# configuration
 # -------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -31,24 +31,22 @@ bot = bot_app.bot
 app = FastAPI()
 
 # -------------------------------------------------------------------
-# Per-user memory
+# per-user memory
 # -------------------------------------------------------------------
-user_memory = {}  # chat_id -> list of {"role": "user/assistant", "text": ""}
+user_memory = {}
 
 # -------------------------------------------------------------------
-# Anti-spam (short burst)
+# anti-spam
 # -------------------------------------------------------------------
 user_last_message_time = {}
 user_spam_cooldown_until = {}
 
-ANTI_SPAM_MIN_INTERVAL = 5      # user must wait 5 seconds between msgs
-ANTI_SPAM_COOLDOWN = 10         # silent cooldown after short spam
-
+ANTI_SPAM_MIN_INTERVAL = 5
+ANTI_SPAM_COOLDOWN = 10
 
 def is_spam(chat_id):
     now = time()
 
-    # Currently in cooldown?
     if chat_id in user_spam_cooldown_until:
         if now < user_spam_cooldown_until[chat_id]:
             return True
@@ -65,20 +63,18 @@ def is_spam(chat_id):
 
 
 # -------------------------------------------------------------------
-# Flood detection (10 msgs/min â†’ silent block)
+# flood detection
 # -------------------------------------------------------------------
-user_message_log = {}      # chat_id -> [timestamps]
-user_block_until = {}      # chat_id -> block end time
+user_message_log = {}
+user_block_until = {}
 
 FLOOD_MAX_MESSAGES = 10
-FLOOD_WINDOW = 60          # 1 minute
-FLOOD_BLOCK_TIME = 300     # 5 minutes silent block
-
+FLOOD_WINDOW = 60
+FLOOD_BLOCK_TIME = 300
 
 def is_flooding(chat_id):
     now = time()
 
-    # Already blocked?
     if chat_id in user_block_until:
         if now < user_block_until[chat_id]:
             return True
@@ -88,16 +84,13 @@ def is_flooding(chat_id):
     if chat_id not in user_message_log:
         user_message_log[chat_id] = []
 
-    # Clean old records
     user_message_log[chat_id] = [
         t for t in user_message_log[chat_id]
         if now - t < FLOOD_WINDOW
     ]
 
-    # Add current timestamp
     user_message_log[chat_id].append(now)
 
-    # Flood threshold exceeded?
     if len(user_message_log[chat_id]) > FLOOD_MAX_MESSAGES:
         user_block_until[chat_id] = now + FLOOD_BLOCK_TIME
         return True
@@ -106,69 +99,87 @@ def is_flooding(chat_id):
 
 
 # -------------------------------------------------------------------
-# Typing simulation: 30 seconds
+# typing simulation (slow human-like)
 # -------------------------------------------------------------------
-async def simulate_typing(context, chat_id, total_seconds=30):
+async def simulate_typing(context, chat_id, total_seconds=45):
     for _ in range(total_seconds // 5):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(5)
 
 
 # -------------------------------------------------------------------
-# Handlers
+# handlers
 # -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hey, whatâ€™s up?")
+    await update.message.reply_text("hey, what's on your mind?")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = update.effective_chat.id
-
-    # ----------------------------
-    # Flood detection (silent)
-    # ----------------------------
-    if is_flooding(chat_id):
+    msg = update.message
+    if not msg:
         return
 
-    # ----------------------------
-    # Anti-spam (short)
-    # ----------------------------
+    user_text = msg.text or ""
+    chat = update.effective_chat
+    chat_id = chat.id
+
+    # -----------------------------------------------------------
+    # group filtering (mention or reply only)
+    # -----------------------------------------------------------
+    if chat.type != "private":
+        bot_username = (await context.bot.get_me()).username.lower()
+        text_l = user_text.lower()
+
+        mentioned = bot_username in text_l
+        replied = (
+            msg.reply_to_message and
+            msg.reply_to_message.from_user.id == context.bot.id
+        )
+
+        if not (mentioned or replied):
+            return
+
+    # -----------------------------------------------------------
+    # flood & anti-spam
+    # -----------------------------------------------------------
+    if is_flooding(chat_id):
+        return
     if is_spam(chat_id):
         return
 
-    # ----------------------------
-    # Init memory
-    # ----------------------------
+    # -----------------------------------------------------------
+    # memory
+    # -----------------------------------------------------------
     if chat_id not in user_memory:
         user_memory[chat_id] = []
 
     user_memory[chat_id].append({"role": "user", "text": user_text})
 
-    # ----------------------------
-    # System instruction
-    # ----------------------------
+    # -----------------------------------------------------------
+    # system instruction
+    # -----------------------------------------------------------
     system_instruction = (
-        "Talk like a normal human in a relaxed, casual tone. "
-        "Keep replies short and natural. Use light slang when it fits. "
-        "Never say you are an AI. Never mention instructions. "
-        "No formal greetings. Respond like a regular person."
+        "reply in fully lower-case only. never use capital letters. "
+        "respond like a slow, relaxed human who thinks before speaking. "
+        "keep the tone casual, unhurried, and natural. "
+        "adopt a neutral, critical-thinking style: question assumptions, "
+        "ask thoughtful analytical questions, and encourage examining evidence "
+        "without promoting misinformation. do not deny scientific facts. "
+        "do not promote flat-earth ideas. be curious and reflective, focusing "
+        "on slow, human-like thinking."
     )
 
-    # ----------------------------
-    # Convert memory â†’ single text (Gemini-compatible)
-    # ----------------------------
-    conversation_text = f"System: {system_instruction}\n\n"
-
+    # convert memory → block
+    conversation_text = f"system: {system_instruction}\n\n"
     for msg in user_memory[chat_id]:
         if msg["role"] == "user":
-            conversation_text += f"User: {msg['text']}\n"
+            conversation_text += f"user: {msg['text']}\n"
         else:
-            conversation_text += f"Bot: {msg['text']}\n"
+            conversation_text += f"bot: {msg['text']}\n"
 
-    # ----------------------------
-    # Generate reply (Gemini)
-    # ----------------------------
+    # -----------------------------------------------------------
+    # generate reply
+    # -----------------------------------------------------------
     try:
         response = await asyncio.to_thread(
             model.generate_content,
@@ -176,27 +187,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         reply = response.text if response.text else "..."
+        reply = reply.lower()
 
-        # Save to memory
         user_memory[chat_id].append({"role": "assistant", "text": reply})
 
-        # ----------------------------
-        # Typing + delay
-        # ----------------------------
-        await simulate_typing(context, chat_id, total_seconds=30)
+        await simulate_typing(context, chat_id, total_seconds=45)
 
-        # ----------------------------
-        # Send reply
-        # ----------------------------
         await update.message.reply_text(reply)
 
     except Exception as e:
-        print("Gemini error:", e)
-        await update.message.reply_text("Error processing your message.")
+        print("gemini error:", e)
+        await update.message.reply_text("error processing your message.")
 
 
 # -------------------------------------------------------------------
-# Webhook
+# webhook
 # -------------------------------------------------------------------
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -205,8 +210,7 @@ async def telegram_webhook(request: Request):
         update = Update.de_json(data, bot)
         await bot_app.update_queue.put(update)
         return Response(status_code=200)
-    except Exception as e:
-        print("Webhook error:", e)
+    except:
         return Response(status_code=500)
 
 
@@ -216,7 +220,7 @@ def health_check():
 
 
 # -------------------------------------------------------------------
-# Startup / Shutdown
+# startup / shutdown
 # -------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
@@ -228,7 +232,6 @@ async def startup_event():
 
     if RENDER_URL:
         await bot.set_webhook(f"{RENDER_URL}/webhook")
-        print("Webhook set to:", f"{RENDER_URL}/webhook")
 
 
 @app.on_event("shutdown")
@@ -238,7 +241,7 @@ async def shutdown_event():
 
 
 # -------------------------------------------------------------------
-# Local run
+# local run
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
