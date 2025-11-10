@@ -101,7 +101,7 @@ def is_flooding(chat_id):
 # -------------------------------------------------------------------
 # typing simulation (slow human-like)
 # -------------------------------------------------------------------
-async def simulate_typing(context, chat_id, total_seconds=5):
+async def simulate_typing(context, chat_id, total_seconds=15):
     for _ in range(total_seconds // 5):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(5)
